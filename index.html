@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>作業催繳管理系統 - JaydenMO</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { background-color: #0f172a; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #f472b6; border-radius: 10px; }
+        /* 固定左側欄位的陰影效果 */
+        .sticky-col { position: sticky; left: 0; z-index: 10; background-color: white !important; box-shadow: 2px 0 5px rgba(0,0,0,0.1); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect, createElement } = React;
+
+        /**
+         * 修正後的 Icon 組件
+         * 解決 React Error #130 (Minified React error #130)
+         * 原因：CDN 版本的 Lucide 圖標是物件而非 React 組件。
+         * 解決方案：使用 lucide.createIcons() 配合 HTML 特性，或直接渲染帶屬性的標籤。
+         */
+        const Icon = ({ name, size = 24, className = "" }) => {
+            useEffect(() => {
+                if (window.lucide) {
+                    window.lucide.createIcons();
+                }
+            }, [name]);
+
+            // 使用 Lucide 官方推薦的網頁標籤模式，這能避免 React 組件辨識錯誤
+            return (
+                <i 
+                    data-lucide={name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()} 
+                    className={className}
+                    style={{ 
+                        width: size, 
+                        height: size, 
+                        display: 'inline-flex', 
+                        alignItems: 'center', 
+                        justifyContent: 'center' 
+                    }}
+                ></i>
+            );
+        };
+
+        const App = () => {
+            const [students, setStudents] = useState([]);
+            const [assignments, setAssignments] = useState([]);
+            const [submissions, setSubmissions] = useState({});
+            const [currentDate, setCurrentDate] = useState(new Date().toISOString().split('T')[0]);
+            const [searchTerm, setSearchTerm] = useState('');
+            const [gasUrl, setGasUrl] = useState('');
+            const [isSaving, setIsSaving] = useState(false);
+            const [message, setMessage] = useState({ type: '', text: '' });
+
+            const showMessage = (type, text) => {
+                setMessage({ type, text });
+                setTimeout(() => setMessage({ type: '', text: '' }), 3000);
+            };
+
+            const processCSV = (file, callback) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const text = e.target.result;
+                    callback(text);
+                };
+                // 為了相容 Excel，嘗試以 UTF-8 讀取
+                reader.readAsText(file, 'UTF-8'); 
+            };
+
+            const handleStudentUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                processCSV(file, (text) => {
+                    const rows = text.split(/\r?\n/).filter(row => row.trim());
+                    // 假設格式：座號,姓名
+                    const data = rows.slice(1).map(row => {
+                        const cols = row.split(',');
+                        return { id: cols[0]?.trim(), name: cols[1]?.trim() };
+                    }).filter(s => s.id && s.name);
+                    setStudents(data);
+                    showMessage('success', `成功匯入 ${data.length} 位學生`);
+                });
+            };
+
+            const handleAssignmentUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                processCSV(file, (text) => {
+                    const rows = text.split(/\r?\n/).map(r => r.trim()).filter(r => r && r !== '作業名稱' && r !== '座號' && r !== '姓名');
+                    setAssignments(rows);
+                    showMessage('success', `成功匯入 ${rows.length} 項作業`);
+                });
+            };
+
+            const toggleSubmission = (studentId, assignment) => {
+                const key = `${studentId}-${assignment}`;
+                setSubmissions(prev => ({ ...prev, [key]: !prev[key] }));
+            };
+
+            const saveToGoogle = async () => {
+                if (!gasUrl) {
+                    showMessage('error', '請先輸入 API 連結');
+                    return;
+                }
+                const missingList = [];
+                students.forEach(student => {
+                    assignments.forEach(task => {
+                        if (!submissions[`${student.id}-${task}`]) {
+                            missingList.push({
+                                date: currentDate,
+                                studentId: student.id,
+                                studentName: student.name,
+                                assignment: task,
+                                status: '未繳'
+                            });
+                        }
+                    });
+                });
+
+                if (missingList.length === 0) {
+                    showMessage('success', '全員繳清，無需記錄！');
+                    return;
+                }
+
+                setIsSaving(true);
+                try {
+                    await fetch(gasUrl, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ data: missingList })
+                    });
+                    showMessage('success', `已同步 ${missingList.length} 筆未繳紀錄`);
+                } catch (error) {
+                    showMessage('error', '同步失敗');
+                } finally {
+                    setIsSaving(false);
+                }
+            };
+
+            const filteredStudents = useMemo(() => {
+                return students.filter(s => s.name.includes(searchTerm) || s.id.includes(searchTerm));
+            }, [students, searchTerm]);
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 bg-slate-900">
+                    <div className="max-w-7xl mx-auto">
+                        {/* Header */}
+                        <div className="bg-[#fce7f3] rounded-2xl shadow-xl p-6 mb-6 border border-pink-200">
+                            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                                <div>
+                                    <h1 className="text-2xl font-bold text-pink-900 flex items-center gap-2">
+                                        <Icon name="alert-circle" className="text-pink-600" size={28} />
+                                        學生作業繳交管理系統
+                                    </h1>
+                                    <p className="text-pink-700 text-sm mt-1">勾選 = 已繳；未勾選 = 將存入未繳紀錄</p>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <div className="flex flex-col items-end">
+                                        <span className="text-[10px] text-pink-500 font-bold mb-1 uppercase tracking-wider flex items-center gap-1">
+                                            <Icon name="calendar" size={12} /> 登記日期
+                                        </span>
+                                        <input 
+                                            type="date" 
+                                            value={currentDate}
+                                            onChange={(e) => setCurrentDate(e.target.value)}
+                                            className="bg-white border-pink-300 rounded-lg px-3 py-2 text-pink-700 text-sm outline-none border focus:ring-2 focus:ring-pink-400"
+                                        />
+                                    </div>
+                                    <button 
+                                        onClick={saveToGoogle}
+                                        disabled={isSaving}
+                                        className="bg-pink-600 hover:bg-pink-700 text-white px-6 py-2 h-10 self-end rounded-lg font-medium flex items-center gap-2 disabled:opacity-50 shadow-md active:scale-95 transition-all"
+                                    >
+                                        <Icon name="save" size={18} />
+                                        {isSaving ? '處理中...' : '同步未繳名單'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Setup */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                            <div className="bg-[#fce7f3] p-5 rounded-xl border border-pink-200 shadow-md">
+                                <h3 className="text-sm font-bold text-pink-800 mb-3 flex items-center gap-2">
+                                    <Icon name="users" size={16}/> 1. 上傳學生名單
+                                </h3>
+                                <input type="file" accept=".csv" onChange={handleStudentUpload} className="text-xs w-full bg-white p-2 rounded border-pink-200 cursor-pointer" />
+                            </div>
+                            <div className="bg-[#fce7f3] p-5 rounded-xl border border-pink-200 shadow-md">
+                                <h3 className="text-sm font-bold text-pink-800 mb-3 flex items-center gap-2">
+                                    <Icon name="file-text" size={16}/> 2. 上傳作業名稱
+                                </h3>
+                                <input type="file" accept=".csv" onChange={handleAssignmentUpload} className="text-xs w-full bg-white p-2 rounded border-pink-200 cursor-pointer" />
+                            </div>
+                            <div className="bg-[#fce7f3] p-5 rounded-xl border border-pink-200 shadow-md">
+                                <h3 className="text-sm font-bold text-pink-800 mb-3 flex items-center gap-2">
+                                    <Icon name="link" size={16}/> 3. Google API 連結
+                                </h3>
+                                <input 
+                                    type="text" 
+                                    placeholder="貼上 GAS Web App URL" 
+                                    className="w-full text-xs p-2 border border-pink-200 rounded focus:ring-2 focus:ring-pink-400 outline-none"
+                                    value={gasUrl}
+                                    onChange={(e) => setGasUrl(e.target.value)}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Search & Feedback */}
+                        <div className="mb-4 flex flex-wrap justify-between items-center gap-4">
+                            <div className="relative w-full md:w-64">
+                                <div className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                                    <Icon name="search" className="text-pink-400" size={16} />
+                                </div>
+                                <input 
+                                    type="text" 
+                                    placeholder="搜尋學生 (姓名/座號)..." 
+                                    className="w-full pl-10 pr-4 py-2 bg-[#fdf2f8] border border-pink-200 rounded-full text-sm focus:ring-2 focus:ring-pink-400 outline-none"
+                                    value={searchTerm}
+                                    onChange={(e) => setSearchTerm(e.target.value)}
+                                />
+                            </div>
+                            {message.text && (
+                                <div className={`px-4 py-2 rounded-full text-sm font-bold shadow-sm transition-all animate-bounce ${
+                                    message.type === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'
+                                }`}>
+                                    {message.text}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Main Table */}
+                        <div className="bg-[#fdf2f8] rounded-2xl shadow-2xl border border-pink-200 overflow-hidden">
+                            <div className="overflow-x-auto max-h-[600px] custom-scrollbar">
+                                <table className="w-full text-left border-collapse min-w-[600px]">
+                                    <thead className="sticky top-0 z-20 bg-[#fce7f3] shadow-sm">
+                                        <tr>
+                                            <th className="p-4 text-sm font-extrabold text-pink-900 sticky left-0 bg-[#fce7f3] z-30 min-w-[160px] border-b border-pink-200 shadow-[2px_0_5px_rgba(0,0,0,0.05)]">座號 / 姓名</th>
+                                            {assignments.map((item, idx) => (
+                                                <th key={idx} className="p-4 text-xs font-bold text-pink-800 text-center min-w-[120px] border-l border-pink-100 border-b border-pink-200 uppercase tracking-tighter">
+                                                    {item}
+                                                </th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {filteredStudents.length > 0 ? (
+                                            filteredStudents.map((student) => (
+                                                <tr key={student.id} className="hover:bg-pink-50 border-b border-pink-100 transition-colors">
+                                                    <td className="p-4 sticky-col font-medium border-r border-pink-100">
+                                                        <span className="text-pink-600 text-[10px] font-black block leading-tight">ID: {student.id}</span>
+                                                        <span className="text-slate-800 font-bold">{student.name}</span>
+                                                    </td>
+                                                    {assignments.map((task, idx) => {
+                                                        const isChecked = submissions[`${student.id}-${task}`];
+                                                        return (
+                                                            <td key={idx} className="p-2 text-center border-l border-pink-50">
+                                                                <button
+                                                                    onClick={() => toggleSubmission(student.id, task)}
+                                                                    className={`w-12 h-12 rounded-xl flex items-center justify-center mx-auto transition-all transform active:scale-90 ${
+                                                                        isChecked 
+                                                                        ? 'bg-green-500 text-white shadow-lg' 
+                                                                        : 'bg-white text-pink-200 border-2 border-dashed border-pink-200 hover:border-pink-400'
+                                                                    }`}
+                                                                >
+                                                                    {isChecked ? (
+                                                                        <Icon name="check-circle" size={28} />
+                                                                    ) : (
+                                                                        <span className="text-[10px] font-black opacity-60">未繳</span>
+                                                                    )}
+                                                                </button>
+                                                            </td>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            ))
+                                        ) : (
+                                            <tr>
+                                                <td colSpan={assignments.length + 1} className="p-24 text-center">
+                                                    <div className="flex flex-col items-center gap-4 opacity-40">
+                                                        <Icon name="inbox" size={64} className="text-pink-300" />
+                                                        <p className="text-pink-500 font-bold tracking-widest">請先上傳 CSV 資料檔或調整搜尋條件</p>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        {/* Footer Info */}
+                        <div className="mt-8 flex flex-col items-center gap-2">
+                            <div className="h-[1px] w-24 bg-pink-500/20 mb-2"></div>
+                            <p className="text-pink-400/60 text-sm font-semibold tracking-[0.2em] uppercase">Teacher Assistant System</p>
+                            <p className="text-pink-500/30 text-[9px] italic">Developed by JaydenMO | v2.1 Fixed Rendering</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
